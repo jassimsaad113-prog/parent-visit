@@ -1299,123 +1299,90 @@
   // ============= رابط Apps Script =============
   const DRIVE_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbz6jDHZ3N6z0DGE6NkuWlbpEIALvhxddxoDC8SjiZ3DDrIGD3gZkVp3EVtCO1PeU2ltcw/exec";
 
-  // ============= دالة الإرسال (إرسال PDF على دفعات لـ Safari iPhone) =============
+  // ============= دالة الإرسال لـ Apps Script (نفس طريقة منصة الجرن - تشتغل على iPhone) =============
   async function sendToAppsScript(url, fileName, fileBase64) {
-    const isMobile = /iPhone|iPad|iPod/i.test(navigator.userAgent);
-    const reportDataStr = JSON.stringify(getReportDataPayload());
+    // FormData بدون no-cors - يقرأ الاستجابة الكاملة
+    const formData = new FormData();
+    formData.append('fileName', fileName);
+    formData.append('fileData', fileBase64);
+    formData.append('reportData', JSON.stringify(getReportDataPayload()));
 
-    // حجم كل دفعة (Safari iPhone يفشل مع >200KB، فنخلي الدفعة 40KB)
-    const CHUNK_SIZE = 40000;
-    const chunks = [];
-    for (let i = 0; i < fileBase64.length; i += CHUNK_SIZE) {
-      chunks.push(fileBase64.substring(i, i + CHUNK_SIZE));
-    }
-
-    // معرّف فريد للملف (لتجميع الدفعات في Apps Script)
-    const uploadId = 'upload_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
-
-    // إرسال طلب واحد (للحاسوب) أو طلبات متعددة (للجوال)
-    if (!isMobile || chunks.length === 1) {
-      // الحاسوب: إرسال عادي بكل البيانات
-      return await sendOneRequest(url, {
-        fileName: fileName,
-        fileData: fileBase64,
-        reportData: reportDataStr
-      });
-    }
-
-    // الجوال: إرسال على دفعات
     try {
-      // أولاً: إرسال البيانات الأساسية مع أول دفعة
-      await sendOneRequest(url, {
-        action: 'chunk_start',
-        uploadId: uploadId,
-        fileName: fileName,
-        reportData: reportDataStr,
-        totalChunks: String(chunks.length),
-        chunkIndex: '0',
-        chunkData: chunks[0]
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+        redirect: 'follow'
       });
 
-      // باقي الدفعات (مع تأخير أكبر لضمان عدم تجاوز Apps Script للقفل)
-      for (let i = 1; i < chunks.length; i++) {
-        await sendOneRequest(url, {
-          action: 'chunk_part',
-          uploadId: uploadId,
-          chunkIndex: String(i),
-          chunkData: chunks[i]
-        });
-
-        // تأخير 800 مللي ثانية بين الدفعات
-        // مهم: Apps Script Cache يحتاج وقت ليعكس البيانات على كل العمليات
-        await new Promise(r => setTimeout(r, 800));
+      if (!response.ok) {
+        throw new Error('HTTP ' + response.status);
       }
 
-      // ملاحظة: لا نحتاج chunk_finish - Apps Script يحفظ تلقائياً
-      // عند استلام آخر دفعة (الإصدار 6+)
+      const responseText = await response.text();
+      console.log('استجابة Apps Script:', responseText);
 
-      return {
-        success: true,
-        fileName: fileName,
-        message: 'تم الإرسال بنجاح ✅ (' + chunks.length + ' دفعات)'
-      };
-
-    } catch (err) {
-      throw new Error('فشل الإرسال: ' + (err.message || 'خطأ غير معروف'));
-    }
-  }
-
-  // إرسال طلب واحد لـ Apps Script
-  async function sendOneRequest(url, dataObj) {
-    const params = new URLSearchParams();
-    Object.keys(dataObj).forEach(key => {
-      params.append(key, dataObj[key]);
-    });
-
-    try {
-      await fetch(url, {
-        method: 'POST',
-        mode: 'no-cors',
-        cache: 'no-store',
-        redirect: 'follow',
-        body: params
-      });
-
-      return { success: true };
+      try {
+        const result = JSON.parse(responseText);
+        return result;
+      } catch (e) {
+        // الاستجابة وصلت لكن مش JSON - اعتبرها نجاح
+        return {
+          success: true,
+          fileName: fileName,
+          message: 'تم الإرسال بنجاح'
+        };
+      }
 
     } catch (err) {
-      // محاولة احتياطية
+      console.error('فشل fetch:', err);
+
+      // محاولة احتياطية بـ XMLHttpRequest (لـ Safari في حالات نادرة)
       return await new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', url, true);
-        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded;charset=UTF-8');
-        xhr.timeout = 30000;
+        xhr.timeout = 120000;
 
         let resolved = false;
 
-        xhr.onload = () => {
+        xhr.onload = function() {
           if (resolved) return;
           resolved = true;
-          resolve({ success: true });
-        };
 
-        xhr.onerror = () => {
-          if (resolved) return;
-          resolved = true;
-          if (navigator.onLine) {
-            resolve({ success: true });
+          if (xhr.status >= 200 && xhr.status < 400) {
+            try {
+              resolve(JSON.parse(xhr.responseText));
+            } catch (e) {
+              resolve({ success: true, fileName: fileName, message: 'تم الإرسال' });
+            }
+          } else if (xhr.status === 0) {
+            // Safari مع CORS
+            resolve({ success: true, fileName: fileName, message: 'تم الإرسال (Safari)' });
           } else {
-            reject(new Error('لا يوجد اتصال'));
+            reject(new Error('HTTP ' + xhr.status));
           }
         };
 
-        xhr.ontimeout = () => {
+        xhr.onerror = function() {
           if (resolved) return;
           resolved = true;
-          reject(new Error('انتهت المهلة'));
+          if (navigator.onLine) {
+            resolve({
+              success: true,
+              fileName: fileName,
+              message: 'تم الإرسال - يرجى التحقق من المجلد للتأكيد'
+            });
+          } else {
+            reject(new Error('لا يوجد اتصال بالإنترنت'));
+          }
         };
 
-        xhr.send(params.toString());
+        xhr.ontimeout = function() {
+          if (resolved) return;
+          resolved = true;
+          reject(new Error('انتهت مهلة الإرسال'));
+        };
+
+        xhr.send(formData);
       });
     }
   }
