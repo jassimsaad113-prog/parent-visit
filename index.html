@@ -1299,84 +1299,125 @@
   // ============= رابط Apps Script =============
   const DRIVE_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbz6jDHZ3N6z0DGE6NkuWlbpEIALvhxddxoDC8SjiZ3DDrIGD3gZkVp3EVtCO1PeU2ltcw/exec";
 
-  // ============= دالة الإرسال (تعمل على Safari iPhone) =============
+  // ============= دالة الإرسال (إرسال PDF على دفعات لـ Safari iPhone) =============
   async function sendToAppsScript(url, fileName, fileBase64) {
-    // نرسل البيانات كـ URLSearchParams (يعامله Safari كطلب بسيط)
-    // هذي الطريقة تشتغل على Safari iPhone لأنها لا تحتاج preflight CORS
+    const isMobile = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+    const reportDataStr = JSON.stringify(getReportDataPayload());
 
+    // حجم كل دفعة (Safari iPhone يفشل مع >200KB، فنخلي الدفعة 40KB)
+    const CHUNK_SIZE = 40000;
+    const chunks = [];
+    for (let i = 0; i < fileBase64.length; i += CHUNK_SIZE) {
+      chunks.push(fileBase64.substring(i, i + CHUNK_SIZE));
+    }
+
+    // معرّف فريد للملف (لتجميع الدفعات في Apps Script)
+    const uploadId = 'upload_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+
+    // إرسال طلب واحد (للحاسوب) أو طلبات متعددة (للجوال)
+    if (!isMobile || chunks.length === 1) {
+      // الحاسوب: إرسال عادي بكل البيانات
+      return await sendOneRequest(url, {
+        fileName: fileName,
+        fileData: fileBase64,
+        reportData: reportDataStr
+      });
+    }
+
+    // الجوال: إرسال على دفعات
+    try {
+      // أولاً: إرسال البيانات الأساسية مع أول دفعة
+      await sendOneRequest(url, {
+        action: 'chunk_start',
+        uploadId: uploadId,
+        fileName: fileName,
+        reportData: reportDataStr,
+        totalChunks: String(chunks.length),
+        chunkIndex: '0',
+        chunkData: chunks[0]
+      });
+
+      // باقي الدفعات
+      for (let i = 1; i < chunks.length; i++) {
+        await sendOneRequest(url, {
+          action: 'chunk_part',
+          uploadId: uploadId,
+          chunkIndex: String(i),
+          chunkData: chunks[i]
+        });
+
+        // تأخير صغير بين الدفعات لتفادي rate limiting
+        await new Promise(r => setTimeout(r, 200));
+      }
+
+      // الدفعة الأخيرة: طلب التجميع والحفظ
+      await sendOneRequest(url, {
+        action: 'chunk_finish',
+        uploadId: uploadId
+      });
+
+      return {
+        success: true,
+        fileName: fileName,
+        message: 'تم الإرسال بنجاح ✅ (' + chunks.length + ' دفعات)'
+      };
+
+    } catch (err) {
+      throw new Error('فشل الإرسال: ' + (err.message || 'خطأ غير معروف'));
+    }
+  }
+
+  // إرسال طلب واحد لـ Apps Script
+  async function sendOneRequest(url, dataObj) {
     const params = new URLSearchParams();
-    params.append('fileName', fileName);
-    params.append('fileData', fileBase64);
-    params.append('reportData', JSON.stringify(getReportDataPayload()));
+    Object.keys(dataObj).forEach(key => {
+      params.append(key, dataObj[key]);
+    });
 
     try {
-      // Safari iPhone يحب URLSearchParams + Content-Type "application/x-www-form-urlencoded"
-      // هذا "simple request" حسب CORS، لا يحتاج preflight
-      const response = await fetch(url, {
+      await fetch(url, {
         method: 'POST',
         mode: 'no-cors',
         cache: 'no-store',
         redirect: 'follow',
-        body: params,
-        // ملاحظة: بدون headers - URLSearchParams يضع Content-Type تلقائياً
+        body: params
       });
 
-      // مع mode: no-cors لا نقدر نقرأ الرد، لكن الطلب وصل بنجاح إذا ما طلع خطأ
-      return {
-        success: true,
-        fileName: fileName,
-        message: 'تم الإرسال بنجاح'
-      };
+      return { success: true };
 
     } catch (err) {
-      console.error('فشل fetch:', err);
-
-      // محاولة احتياطية بـ XMLHttpRequest
+      // محاولة احتياطية
       return await new Promise((resolve, reject) => {
-        try {
-          const xhr = new XMLHttpRequest();
-          xhr.open('POST', url, true);
-          xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded;charset=UTF-8');
-          xhr.timeout = 60000;
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', url, true);
+        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded;charset=UTF-8');
+        xhr.timeout = 30000;
 
-          let resolved = false;
+        let resolved = false;
 
-          xhr.onload = function() {
-            if (resolved) return;
-            resolved = true;
-            resolve({
-              success: true,
-              fileName: fileName,
-              message: 'تم الإرسال بنجاح'
-            });
-          };
+        xhr.onload = () => {
+          if (resolved) return;
+          resolved = true;
+          resolve({ success: true });
+        };
 
-          xhr.onerror = function() {
-            if (resolved) return;
-            resolved = true;
-            // حتى لو حصل خطأ في القراءة، الطلب على الأغلب وصل
-            if (navigator.onLine) {
-              resolve({
-                success: true,
-                fileName: fileName,
-                message: 'تم الإرسال - يرجى التحقق من المجلد'
-              });
-            } else {
-              reject(new Error('لا يوجد اتصال بالإنترنت'));
-            }
-          };
+        xhr.onerror = () => {
+          if (resolved) return;
+          resolved = true;
+          if (navigator.onLine) {
+            resolve({ success: true });
+          } else {
+            reject(new Error('لا يوجد اتصال'));
+          }
+        };
 
-          xhr.ontimeout = function() {
-            if (resolved) return;
-            resolved = true;
-            reject(new Error('انتهت مهلة الإرسال'));
-          };
+        xhr.ontimeout = () => {
+          if (resolved) return;
+          resolved = true;
+          reject(new Error('انتهت المهلة'));
+        };
 
-          xhr.send(params.toString());
-
-        } catch (xhrErr) {
-          reject(new Error('فشل الإرسال: ' + xhrErr.message));
-        }
+        xhr.send(params.toString());
       });
     }
   }
