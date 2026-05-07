@@ -1337,7 +1337,7 @@
         chunkData: chunks[0]
       });
 
-      // باقي الدفعات
+      // باقي الدفعات (مع تأخير أكبر لضمان عدم تجاوز Apps Script للقفل)
       for (let i = 1; i < chunks.length; i++) {
         await sendOneRequest(url, {
           action: 'chunk_part',
@@ -1346,15 +1346,13 @@
           chunkData: chunks[i]
         });
 
-        // تأخير صغير بين الدفعات لتفادي rate limiting
-        await new Promise(r => setTimeout(r, 200));
+        // تأخير 800 مللي ثانية بين الدفعات
+        // مهم: Apps Script Cache يحتاج وقت ليعكس البيانات على كل العمليات
+        await new Promise(r => setTimeout(r, 800));
       }
 
-      // الدفعة الأخيرة: طلب التجميع والحفظ
-      await sendOneRequest(url, {
-        action: 'chunk_finish',
-        uploadId: uploadId
-      });
+      // ملاحظة: لا نحتاج chunk_finish - Apps Script يحفظ تلقائياً
+      // عند استلام آخر دفعة (الإصدار 6+)
 
       return {
         success: true,
